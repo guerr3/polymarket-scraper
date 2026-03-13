@@ -2,35 +2,49 @@
 
 > **⚠️ DISCLAIMER: Not financial advice. This tool is for educational and research purposes only.**
 
-A production-grade, real-time data pipeline and trading advisor for [Polymarket](https://polymarket.com/) prediction markets.
+A production-grade, real-time data pipeline and intelligence platform for [Polymarket](https://polymarket.com/) prediction markets. Combines multi-source news aggregation, NLP sentiment analysis, cross-market arbitrage detection, historical calibration modeling, and event-driven triggers into a unified intelligence pipeline.
 
 ## Architecture
 
 ```
-                    ┌─────────────┐
-                    │   CLI / UI  │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼────────────┐
-              │            │            │
-    ┌─────────▼──┐  ┌──────▼─────┐  ┌──▼──────────┐
-    │   GAMMA    │  │   CLOB     │  │  Goldsky     │
-    │  REST API  │  │  REST API  │  │  GraphQL     │
-    └─────────┬──┘  └──────┬─────┘  └──┬──────────┘
-              │            │            │
-              └────────────┼────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  Unified    │
-                    │  Models     │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼────────────┐
-              │                         │
-    ┌─────────▼──────┐      ┌──────────▼─────┐
-    │  PostgreSQL    │      │   Trading      │
-    │  Storage       │      │   Advisor      │
-    └────────────────┘      └────────────────┘
+                         ┌─────────────┐
+                         │   CLI / UI  │
+                         └──────┬──────┘
+                                │
+               ┌────────────────┼────────────────┐
+               │                │                │
+     ┌─────────▼──┐  ┌─────────▼──────┐  ┌──────▼─────────┐
+     │   GAMMA    │  │   CLOB         │  │  Goldsky        │
+     │  REST API  │  │  REST API      │  │  GraphQL        │
+     └─────────┬──┘  └─────────┬──────┘  └──────┬─────────┘
+               │                │                │
+               └────────────────┼────────────────┘
+                                │
+                         ┌──────▼──────┐
+                         │  Unified    │
+                         │  Models     │
+                         └──────┬──────┘
+                                │
+        ┌───────────┬───────────┼───────────┬───────────┐
+        │           │           │           │           │
+  ┌─────▼────┐ ┌────▼────┐ ┌───▼────┐ ┌────▼────┐ ┌───▼──────┐
+  │Sentiment │ │ News    │ │Arbitr. │ │ Calib.  │ │ Event    │
+  │ NLP      │ │ Feeds   │ │Detect. │ │ Model   │ │ Triggers │
+  └─────┬────┘ └────┬────┘ └───┬────┘ └────┬────┘ └───┬──────┘
+        │           │           │           │           │
+        └───────────┴───────────┼───────────┴───────────┘
+                                │
+                    ┌───────────▼───────────┐
+                    │  Intelligence Pipeline │
+                    │  (Weighted Composite)  │
+                    └───────────┬───────────┘
+                                │
+               ┌────────────────┼────────────────┐
+               │                                 │
+     ┌─────────▼──────┐              ┌───────────▼─────┐
+     │  PostgreSQL    │              │  Signal Report   │
+     │  Storage       │              │  (Buy/Sell/Hold) │
+     └────────────────┘              └─────────────────┘
 ```
 
 ### Data Sources
@@ -114,21 +128,35 @@ Polling cadences:
 - CLOB prices & trades: every 15 seconds (top-N markets)
 - Goldsky subgraphs: every 120 seconds
 
-### Trading advisor
+### Intelligence pipeline
 
 ```bash
-# Generate signal for a market
-python main.py advisor --condition-id 0x1234...abcd
+# Full intelligence analysis for a market (sentiment + triggers + calibration + arbitrage)
+python main.py intel analyze --slug "will-btc-reach-100k"
 
-# Run backtest
-python main.py backtest --condition-id 0x1234...abcd
+# Sentiment analysis only
+python main.py intel sentiment --slug "will-btc-reach-100k"
 
-# Backtest with custom parameters
-python main.py backtest --condition-id 0x1234...abcd --window 40 --hold 8
+# Cross-market arbitrage scan
+python main.py intel arbitrage
 
-# Export backtest results
-python main.py backtest --condition-id 0x1234...abcd --output backtest.json
+# Historical calibration report
+python main.py intel calibration
+
+# Event trigger scan for a market
+python main.py intel triggers --slug "will-btc-reach-100k"
 ```
+
+### Intelligence components
+
+| Component | Description | Weight |
+|-----------|-------------|--------|
+| **Sentiment** | Keyword/lexicon NLP with negation detection, source credibility weighting | 30% |
+| **Triggers** | Breaking news, official statements, key accounts, news clusters, sentiment shifts | 30% |
+| **Calibration** | Historical accuracy analysis with Brier score, log loss, exploitable price ranges | 20% |
+| **Arbitrage** | Cross-market correlation, implication/exclusion logic, temporal consistency | 20% |
+
+Signals: `STRONG_BUY` > `BUY` > `LEAN_BUY` > `NEUTRAL` > `LEAN_SELL` > `SELL` > `STRONG_SELL`
 
 ### HTML fallback
 
@@ -153,15 +181,29 @@ polymarket-scraper/
 │   ├── resilience.py       # Retries, rate limiting, circuit breaker
 │   ├── storage.py          # PostgreSQL/Supabase storage layer
 │   └── realtime.py         # Polling loops & scheduler
+├── intelligence/
+│   ├── __init__.py
+│   ├── sentiment.py        # Keyword/lexicon NLP sentiment analyzer
+│   ├── news_feeds.py       # RSS/Atom/Google News/Nitter aggregator
+│   ├── arbitrage.py        # Cross-market arbitrage detector
+│   ├── calibration.py      # Historical calibration model
+│   ├── event_triggers.py   # Event-driven trigger detector
+│   └── signals.py          # Unified intelligence pipeline
 ├── advisor/
 │   ├── __init__.py
-│   ├── features.py         # Feature engineering
-│   ├── signals.py          # Signal generation
-│   └── backtest.py         # Backtesting engine
+│   ├── features.py         # Feature engineering (legacy)
+│   ├── signals.py          # Signal generation (legacy)
+│   └── backtest.py         # Backtesting engine (legacy)
 ├── tests/
 │   ├── test_pagination.py
 │   ├── test_models.py
-│   └── test_backtest.py
+│   ├── test_backtest.py
+│   ├── test_sentiment.py
+│   ├── test_news_feeds.py
+│   ├── test_arbitrage.py
+│   ├── test_calibration.py
+│   ├── test_event_triggers.py
+│   └── test_signals.py
 ├── migrations/
 │   └── 001_initial.sql
 ├── cli.py                  # Typer CLI
@@ -201,9 +243,11 @@ The pipeline includes:
 cd polymarket-scraper
 python -m pytest tests/ -v
 
+# Run intelligence tests only
+python -m pytest tests/test_sentiment.py tests/test_news_feeds.py tests/test_arbitrage.py tests/test_calibration.py tests/test_event_triggers.py tests/test_signals.py -v
+
 # Run specific test
 python -m pytest tests/test_models.py -v
-python -m pytest tests/test_backtest.py -v
 ```
 
 ## Ethics & Legal
