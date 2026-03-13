@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: polymarket-db
+    environment:
+      POSTGRES_DB: polymarket
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pipeline:
+    build: .
+    container_name: polymarket-pipeline
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/polymarket
+      # Optional: set these for Supabase
+      # SUPABASE_URL: https://your-project.supabase.co
+      # SUPABASE_KEY: your-anon-key
+      # PROXY_URL: http://proxy:8080
+    command: ["python", "main.py", "daemon", "--markets-top-n", "100"]
+    volumes:
+      - ./:/app
+    working_dir: /app
+
+volumes:
+  pgdata:
