@@ -133,19 +133,22 @@ Polling cadences:
 
 ```bash
 # Full intelligence analysis for a market (sentiment + triggers + calibration + arbitrage)
-python main.py intel analyze --slug "will-btc-reach-100k"
+python main.py intelligence pipeline will-btc-reach-100k
 
 # Sentiment analysis only
-python main.py intel sentiment --slug "will-btc-reach-100k"
+python main.py intelligence sentiment will-btc-reach-100k
 
 # Cross-market arbitrage scan
-python main.py intel arbitrage
+python main.py intelligence arbitrage
 
 # Historical calibration report
-python main.py intel calibration
+python main.py intelligence calibration
 
 # Event trigger scan for a market
-python main.py intel triggers --slug "will-btc-reach-100k"
+python main.py intelligence triggers will-btc-reach-100k
+
+# News feed aggregation for a market
+python main.py intelligence news will-btc-reach-100k
 ```
 
 ### Intelligence components
