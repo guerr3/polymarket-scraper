@@ -18,7 +18,7 @@ from .models import (
     price_history_to_points,
 )
 from .pagination import CursorPaginator
-from .resilience import ResilientSession
+from .resilience import ResilientSession, NonRetryableHttpError
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,19 @@ class ClobClient:
         self.paginator = CursorPaginator(
             terminal_cursor=self.config.terminal_cursor,
         )
+        self._warned_unauthorized_trades = False
+
+    def _headers(self) -> dict[str, str]:
+        """Build request headers with optional CLOB API authentication."""
+        headers = dict(DEFAULT_HEADERS)
+
+        if self.config.api_key:
+            # Support both explicit API-key headers and bearer token auth.
+            headers[self.config.api_key_header] = self.config.api_key
+            if self.config.auth_scheme:
+                headers["Authorization"] = f"{self.config.auth_scheme} {self.config.api_key}"
+
+        return headers
 
     # ------------------------------------------------------------------ #
     #  Markets (CLOB)
@@ -51,7 +64,7 @@ class ClobClient:
                 f"{self.config.base_url}/markets",
                 endpoint_name="clob_markets",
                 rate_limit_rps=self.config.rate_limit_rps,
-                headers=DEFAULT_HEADERS,
+                headers=self._headers(),
                 params=params,
                 timeout=self.config.timeout_seconds,
             )
@@ -96,7 +109,7 @@ class ClobClient:
             f"{self.config.base_url}/prices-history",
             endpoint_name="clob_prices",
             rate_limit_rps=self.config.rate_limit_rps,
-            headers=DEFAULT_HEADERS,
+            headers=self._headers(),
             params=params,
             timeout=self.config.timeout_seconds,
         )
@@ -128,21 +141,32 @@ class ClobClient:
                 f"{self.config.base_url}/trades",
                 endpoint_name="clob_trades",
                 rate_limit_rps=self.config.rate_limit_rps,
-                headers=DEFAULT_HEADERS,
+                headers=self._headers(),
                 params=params,
                 timeout=self.config.timeout_seconds,
             )
 
-        page_count = 0
-        async for page in self.paginator.paginate(fetch_page):
-            for raw in page:
-                try:
-                    all_trades.append(clob_trade_to_model(raw))
-                except Exception as exc:
-                    logger.warning("Failed to parse CLOB trade: %s", exc)
-            page_count += 1
-            if page_count >= max_pages:
-                break
+        try:
+            page_count = 0
+            async for page in self.paginator.paginate(fetch_page):
+                for raw in page:
+                    try:
+                        all_trades.append(clob_trade_to_model(raw))
+                    except Exception as exc:
+                        logger.warning("Failed to parse CLOB trade: %s", exc)
+                page_count += 1
+                if page_count >= max_pages:
+                    break
+        except NonRetryableHttpError as exc:
+            if exc.status == 401:
+                if not self._warned_unauthorized_trades:
+                    logger.warning(
+                        "CLOB trades endpoint returned 401. Set CLOB_API_KEY (and optional "
+                        "CLOB_API_KEY_HEADER/CLOB_AUTH_SCHEME) to enable authenticated trades."
+                    )
+                    self._warned_unauthorized_trades = True
+                return []
+            raise
 
         logger.info(
             "Fetched %d trades for %s", len(all_trades), condition_id[:16]
@@ -160,7 +184,7 @@ class ClobClient:
             f"{self.config.base_url}/book",
             endpoint_name="clob_book",
             rate_limit_rps=self.config.rate_limit_rps,
-            headers=DEFAULT_HEADERS,
+            headers=self._headers(),
             params={"token_id": token_id},
             timeout=self.config.timeout_seconds,
         )

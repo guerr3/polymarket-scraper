@@ -61,10 +61,21 @@ def _write_json(path: str, data) -> None:
 async def _find_market_by_slug(session, slug: str):
     """Fetch markets from GAMMA and find one matching the slug."""
     from polymarket_client.gamma_client import GammaClient
-    from polymarket_client.models import Market
 
     gamma = GammaClient(session)
+
+    # Direct server-side slug lookup avoids false negatives when the target
+    # market is outside the first N paginated active markets.
+    market = await gamma.get_market_by_slug(slug)
+
     markets = await gamma.get_all_markets(active=True, max_pages=10)
+
+    if market:
+        # Ensure the target market is included in context-dependent workflows
+        # (e.g., arbitrage checks against active market snapshots).
+        if not any(m.condition_id == market.condition_id for m in markets):
+            markets.append(market)
+        return market, markets
 
     for m in markets:
         if m.slug == slug:

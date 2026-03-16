@@ -49,12 +49,12 @@ A production-grade, real-time data pipeline and intelligence platform for [Polym
 
 ### Data Sources
 
-| Source | Type | Pagination | Data |
-|--------|------|-----------|------|
-| GAMMA API | REST | offset (limit+offset) | Markets, events metadata |
-| CLOB API | REST | cursor (next_cursor, terminal=`LTE=`) | Prices, trades, orderbook |
-| Goldsky Subgraphs | GraphQL | first+skip | On-chain orders, OI positions |
-| Analytics HTML | Playwright | page-based | Fallback table scraping |
+| Source            | Type       | Pagination                            | Data                          |
+| ----------------- | ---------- | ------------------------------------- | ----------------------------- |
+| GAMMA API         | REST       | offset (limit+offset)                 | Markets, events metadata      |
+| CLOB API          | REST       | cursor (next_cursor, terminal=`LTE=`) | Prices, trades, orderbook     |
+| Goldsky Subgraphs | GraphQL    | first+skip                            | On-chain orders, OI positions |
+| Analytics HTML    | Playwright | page-based                            | Fallback table scraping       |
 
 ## Setup
 
@@ -124,6 +124,7 @@ python main.py daemon --markets-top-n 50 --verbose
 ```
 
 Polling cadences:
+
 - Markets & events: every 60 seconds
 - CLOB prices & trades: every 15 seconds (top-N markets)
 - Goldsky subgraphs: every 120 seconds
@@ -149,12 +150,12 @@ python main.py intel triggers --slug "will-btc-reach-100k"
 
 ### Intelligence components
 
-| Component | Description | Weight |
-|-----------|-------------|--------|
-| **Sentiment** | Keyword/lexicon NLP with negation detection, source credibility weighting | 30% |
-| **Triggers** | Breaking news, official statements, key accounts, news clusters, sentiment shifts | 30% |
-| **Calibration** | Historical accuracy analysis with Brier score, log loss, exploitable price ranges | 20% |
-| **Arbitrage** | Cross-market correlation, implication/exclusion logic, temporal consistency | 20% |
+| Component       | Description                                                                       | Weight |
+| --------------- | --------------------------------------------------------------------------------- | ------ |
+| **Sentiment**   | Keyword/lexicon NLP with negation detection, source credibility weighting         | 30%    |
+| **Triggers**    | Breaking news, official statements, key accounts, news clusters, sentiment shifts | 30%    |
+| **Calibration** | Historical accuracy analysis with Brier score, log loss, exploitable price ranges | 20%    |
+| **Arbitrage**   | Cross-market correlation, implication/exclusion logic, temporal consistency       | 20%    |
 
 Signals: `STRONG_BUY` > `BUY` > `LEAN_BUY` > `NEUTRAL` > `LEAN_SELL` > `SELL` > `STRONG_SELL`
 
@@ -219,12 +220,15 @@ polymarket-scraper/
 
 All settings are configurable via environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/polymarket` | PostgreSQL connection |
-| `SUPABASE_URL` | – | Supabase project URL |
-| `SUPABASE_KEY` | – | Supabase anon key |
-| `PROXY_URL` | – | HTTP proxy for requests |
+| Variable              | Default                                                    | Description                                                     |
+| --------------------- | ---------------------------------------------------------- | --------------------------------------------------------------- |
+| `DATABASE_URL`        | `postgresql://postgres:postgres@localhost:5432/polymarket` | PostgreSQL connection                                           |
+| `SUPABASE_URL`        | –                                                          | Supabase project URL                                            |
+| `SUPABASE_KEY`        | –                                                          | Supabase anon key                                               |
+| `CLOB_API_KEY`        | –                                                          | Optional CLOB API key for authenticated endpoints (e.g. trades) |
+| `CLOB_API_KEY_HEADER` | `X-API-Key`                                                | Header name used for `CLOB_API_KEY`                             |
+| `CLOB_AUTH_SCHEME`    | `Bearer`                                                   | Authorization scheme used with `CLOB_API_KEY`                   |
+| `PROXY_URL`           | –                                                          | HTTP proxy for requests                                         |
 
 ## Resilience
 
@@ -264,4 +268,4 @@ MIT
 
 ---
 
-*Not financial advice. For educational and research purposes only.*
+_Not financial advice. For educational and research purposes only._

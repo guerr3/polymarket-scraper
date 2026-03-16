@@ -13,7 +13,7 @@ from typing import Optional
 from .config import GammaConfig, get_config, DEFAULT_HEADERS
 from .models import Market, gamma_market_to_model
 from .pagination import OffsetPaginator
-from .resilience import ResilientSession
+from .resilience import ResilientSession, NonRetryableHttpError
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,34 @@ class GammaClient:
                 return gamma_market_to_model(raw)
         except Exception as exc:
             logger.error("Failed to fetch market %d: %s", market_id, exc)
+        return None
+
+    async def get_market_by_slug(self, slug: str) -> Optional[Market]:
+        """Fetch a single market by slug using server-side filtering."""
+        try:
+            raw = await self.session.request(
+                "GET",
+                f"{self.config.base_url}/markets",
+                endpoint_name="gamma_market_by_slug",
+                rate_limit_rps=self.config.rate_limit_rps,
+                headers=DEFAULT_HEADERS,
+                params={
+                    "slug": slug,
+                    "limit": 1,
+                    "offset": 0,
+                },
+                timeout=self.config.timeout_seconds,
+            )
+
+            if isinstance(raw, list) and raw:
+                return gamma_market_to_model(raw[0])
+
+        except NonRetryableHttpError as exc:
+            if exc.status != 404:
+                logger.warning("Failed slug lookup for %s: %s", slug, exc)
+        except Exception as exc:
+            logger.warning("Failed slug lookup for %s: %s", slug, exc)
+
         return None
 
     # ------------------------------------------------------------------ #

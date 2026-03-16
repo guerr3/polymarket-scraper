@@ -28,6 +28,9 @@ class ClobConfig:
     terminal_cursor: str = "LTE="
     rate_limit_rps: float = 10.0
     timeout_seconds: int = 30
+    api_key: str = os.environ.get("CLOB_API_KEY", "")
+    api_key_header: str = os.environ.get("CLOB_API_KEY_HEADER", "X-API-Key")
+    auth_scheme: str = os.environ.get("CLOB_AUTH_SCHEME", "Bearer")
 
 
 @dataclass(frozen=True)
