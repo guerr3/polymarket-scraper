@@ -1,15 +1,27 @@
 """
 Sentiment analysis engine for prediction market intelligence.
 
-Uses a keyword/lexicon-based approach with market-context awareness.
-No external API keys required — runs locally with pure Python NLP.
+Provides two backends:
 
-For production use, can be extended with transformer models (HuggingFace)
-or external APIs (OpenAI, Anthropic) via the SentimentProvider interface.
+  1. FinBERTSentimentAnalyzer  — HuggingFace ProsusAI/finbert transformer model.
+     Produces high-accuracy finance-domain sentiment. Requires `transformers`
+     and `torch` (or `onnxruntime` for lighter CPU inference).
+     Loaded lazily on first use; subsequent calls reuse the in-process pipeline.
+
+  2. KeywordSentimentAnalyzer  — Zero-dependency lexicon/keyword fallback.
+     Used automatically when transformers is not installed, or explicitly when
+     you pass `use_finbert=False` to `build_sentiment_analyzer()`.
+
+Factory helper:
+    analyzer = build_sentiment_analyzer()   # auto-selects FinBERT if available
+    analyzer = build_sentiment_analyzer(use_finbert=False)  # force keyword
+
+NOT FINANCIAL ADVICE — for research and education only.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -27,11 +39,11 @@ logger = logging.getLogger(__name__)
 
 class SentimentLabel(str, Enum):
     """Directional sentiment relative to a market's 'Yes' outcome."""
-    VERY_BULLISH = "very_bullish"   # strong Yes signal
-    BULLISH = "bullish"             # mild Yes signal
+    VERY_BULLISH = "very_bullish"
+    BULLISH = "bullish"
     NEUTRAL = "neutral"
-    BEARISH = "bearish"             # mild No signal
-    VERY_BEARISH = "very_bearish"   # strong No signal
+    BEARISH = "bearish"
+    VERY_BEARISH = "very_bearish"
 
 
 @dataclass
@@ -42,9 +54,10 @@ class SentimentResult:
     label: SentimentLabel = SentimentLabel.NEUTRAL
     confidence: float = 0.0        # 0.0 to 1.0
     keywords_found: list[str] = field(default_factory=list)
-    source: str = ""               # e.g., "reuters", "twitter:@user"
+    source: str = ""
     timestamp: Optional[datetime] = None
-    market_relevance: float = 0.0  # 0.0 to 1.0 — how relevant to the market
+    market_relevance: float = 0.0  # 0.0 to 1.0
+    analyzer_backend: str = "keyword"  # "finbert" | "keyword"
 
 
 @dataclass
@@ -52,7 +65,7 @@ class AggregatedSentiment:
     """Aggregated sentiment across multiple sources for a market."""
     market_condition_id: str = ""
     market_question: str = ""
-    overall_score: float = 0.0      # weighted mean of individual scores
+    overall_score: float = 0.0
     overall_label: SentimentLabel = SentimentLabel.NEUTRAL
     confidence: float = 0.0
     sample_count: int = 0
@@ -66,62 +79,20 @@ class AggregatedSentiment:
 
 
 # --------------------------------------------------------------------------- #
-#  Provider interface (for pluggable backends)
+#  Provider interface
 # --------------------------------------------------------------------------- #
 
 class SentimentProvider(Protocol):
     """Interface for pluggable sentiment backends."""
 
     async def analyze(self, text: str, context: str = "") -> SentimentResult:
-        """Analyze sentiment of text in the context of a market question."""
         ...
 
 
 # --------------------------------------------------------------------------- #
-#  Keyword / lexicon based sentiment (zero-dependency)
+#  Source credibility weights  (shared by both analyzers)
 # --------------------------------------------------------------------------- #
 
-# Directional keywords that push toward "Yes" (positive = event likely)
-BULLISH_LEXICON: dict[str, float] = {
-    # Escalation / action words
-    "confirmed": 0.7, "imminent": 0.8, "launched": 0.9, "deployed": 0.7,
-    "invaded": 0.9, "attacked": 0.9, "bombed": 0.85, "strikes": 0.7,
-    "offensive": 0.6, "escalation": 0.7, "mobilized": 0.65, "ordered": 0.6,
-    "approved": 0.7, "signed": 0.6, "passed": 0.6, "enacted": 0.65,
-    "announced": 0.5, "revealed": 0.5, "breaking": 0.6, "urgent": 0.5,
-    "inevitable": 0.75, "certain": 0.7, "guaranteed": 0.8,
-    "surge": 0.6, "spike": 0.5, "soaring": 0.6, "record": 0.4,
-    "winning": 0.6, "leading": 0.5, "ahead": 0.4, "favored": 0.5,
-    "likely": 0.5, "probable": 0.5, "expected": 0.45,
-    # Crypto / financial bullish
-    "rally": 0.6, "bullish": 0.7, "moon": 0.5, "breakout": 0.6,
-    "adoption": 0.5, "approval": 0.65, "etf": 0.5,
-    # Political
-    "elected": 0.7, "victory": 0.7, "won": 0.8, "sworn in": 0.8,
-    "inaugurated": 0.8, "ratified": 0.7,
-}
-
-# Keywords that push toward "No" (negative = event unlikely)
-BEARISH_LEXICON: dict[str, float] = {
-    # De-escalation / negation
-    "denied": 0.7, "rejected": 0.7, "unlikely": 0.6, "impossible": 0.8,
-    "withdrawn": 0.7, "retreated": 0.65, "ceasefire": 0.7, "peace": 0.6,
-    "negotiations": 0.5, "diplomacy": 0.5, "talks": 0.4, "agreement": 0.5,
-    "deal": 0.5, "resolved": 0.6, "postponed": 0.6, "delayed": 0.55,
-    "canceled": 0.7, "cancelled": 0.7, "suspended": 0.6, "halted": 0.6,
-    "failed": 0.6, "collapsed": 0.65, "stalled": 0.5,
-    "debunked": 0.7, "false": 0.6, "hoax": 0.7, "misinformation": 0.6,
-    "losing": 0.6, "trailing": 0.5, "behind": 0.4, "underdog": 0.4,
-    "doubtful": 0.5, "uncertain": 0.3, "improbable": 0.6,
-    # Crypto / financial bearish
-    "crash": 0.7, "bearish": 0.7, "dump": 0.6, "sell-off": 0.65,
-    "banned": 0.7, "crackdown": 0.6, "regulation": 0.4,
-    # Political
-    "defeated": 0.7, "lost": 0.7, "impeached": 0.6, "resigned": 0.6,
-    "vetoed": 0.7,
-}
-
-# Source credibility weights
 SOURCE_WEIGHTS: dict[str, float] = {
     "reuters": 1.0, "ap": 1.0, "bbc": 0.95, "nytimes": 0.95,
     "washingtonpost": 0.9, "wsj": 0.95, "bloomberg": 0.95,
@@ -133,12 +104,331 @@ SOURCE_WEIGHTS: dict[str, float] = {
 }
 
 
+def _get_source_weight(source: str) -> float:
+    source_lower = source.lower()
+    for key, weight in SOURCE_WEIGHTS.items():
+        if key in source_lower:
+            return weight
+    return SOURCE_WEIGHTS["unknown"]
+
+
+def _compute_relevance(text: str, context: str) -> float:
+    """Word-overlap relevance between article text and market question."""
+    if not context:
+        return 0.5
+    stop_words = {
+        "the", "a", "an", "is", "are", "was", "were", "will", "be",
+        "by", "to", "in", "on", "at", "of", "for", "and", "or",
+        "this", "that", "it", "its", "with", "from", "as", "has",
+        "have", "had", "do", "does", "did", "if", "but", "not",
+        "what", "when", "where", "who", "how", "which", "than",
+    }
+    text_words = set(re.findall(r'\b[a-z]{3,}\b', text.lower())) - stop_words
+    ctx_words = set(re.findall(r'\b[a-z]{3,}\b', context.lower())) - stop_words
+    if not ctx_words:
+        return 0.5
+    overlap = text_words & ctx_words
+    return min(1.0, (len(overlap) / len(ctx_words)) * 1.5)
+
+
+@staticmethod
+def _score_to_label(score: float) -> SentimentLabel:
+    if score >= 0.5:
+        return SentimentLabel.VERY_BULLISH
+    elif score >= 0.15:
+        return SentimentLabel.BULLISH
+    elif score <= -0.5:
+        return SentimentLabel.VERY_BEARISH
+    elif score <= -0.15:
+        return SentimentLabel.BEARISH
+    return SentimentLabel.NEUTRAL
+
+
+# --------------------------------------------------------------------------- #
+#  FinBERT transformer analyzer
+# --------------------------------------------------------------------------- #
+
+# FinBERT label mapping → directional score
+# ProsusAI/finbert outputs: "positive", "negative", "neutral"
+_FINBERT_LABEL_SCORE: dict[str, float] = {
+    "positive": 1.0,
+    "neutral": 0.0,
+    "negative": -1.0,
+}
+
+_FINBERT_MODEL = "ProsusAI/finbert"
+_MAX_TOKENS = 512  # FinBERT max sequence length
+
+
+class FinBERTSentimentAnalyzer:
+    """
+    Finance-domain sentiment analyzer powered by ProsusAI/finbert.
+
+    The HuggingFace pipeline is loaded once on first use and cached
+    for the lifetime of the process (lazy singleton pattern).
+
+    Falls back to keyword scoring for relevance computation (same as
+    KeywordSentimentAnalyzer) so that market_relevance is always populated.
+
+    Args:
+        model_name: HuggingFace model identifier. Defaults to ProsusAI/finbert.
+        device: "cpu" | "cuda" | "mps" | int (device index). None = auto-detect.
+        batch_size: Number of texts to process in one forward pass.
+    """
+
+    _pipeline = None  # class-level lazy singleton
+    _pipeline_lock = asyncio.Lock()
+
+    def __init__(
+        self,
+        model_name: str = _FINBERT_MODEL,
+        device: str | int | None = None,
+        batch_size: int = 8,
+    ):
+        self.model_name = model_name
+        self.device = device
+        self.batch_size = batch_size
+        self._keyword_fallback = KeywordSentimentAnalyzer()  # for relevance
+
+    # ------------------------------------------------------------------ #
+    #  Pipeline loading
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    async def _get_pipeline(cls, model_name: str, device: str | int | None):
+        """Lazily load the HuggingFace pipeline (thread-safe)."""
+        if cls._pipeline is not None:
+            return cls._pipeline
+
+        async with cls._pipeline_lock:
+            # Double-checked locking
+            if cls._pipeline is not None:
+                return cls._pipeline
+
+            try:
+                from transformers import pipeline as hf_pipeline
+                import torch
+
+                # Auto-select device
+                if device is None:
+                    if torch.cuda.is_available():
+                        device = 0  # first CUDA GPU
+                    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                        device = "mps"
+                    else:
+                        device = "cpu"
+
+                logger.info(
+                    "Loading FinBERT model '%s' on device '%s' (first-time load, may take ~30s)...",
+                    model_name, device,
+                )
+
+                # Run blocking model load in a thread pool to avoid blocking the event loop
+                loop = asyncio.get_event_loop()
+                pipe = await loop.run_in_executor(
+                    None,
+                    lambda: hf_pipeline(
+                        "text-classification",
+                        model=model_name,
+                        device=device,
+                        top_k=None,           # return all 3 label scores
+                        truncation=True,
+                        max_length=_MAX_TOKENS,
+                    ),
+                )
+                cls._pipeline = pipe
+                logger.info("FinBERT pipeline loaded successfully.")
+                return cls._pipeline
+
+            except ImportError:
+                logger.error(
+                    "transformers/torch not installed. "
+                    "Run: pip install transformers torch\n"
+                    "Falling back to keyword sentiment."
+                )
+                raise
+
+    # ------------------------------------------------------------------ #
+    #  Public API
+    # ------------------------------------------------------------------ #
+
+    async def analyze(
+        self,
+        text: str,
+        context: str = "",
+        source: str = "unknown",
+    ) -> SentimentResult:
+        """
+        Analyze sentiment of a single text using FinBERT.
+
+        Args:
+            text: News headline or article body.
+            context: Market question (used for relevance scoring).
+            source: Source identifier for credibility weighting.
+        """
+        pipe = await self._get_pipeline(self.model_name, self.device)
+
+        # Truncate to model max length (characters; tokenizer will sub-truncate)
+        truncated = text[:2000]
+
+        # Run inference in executor to avoid blocking the async event loop
+        loop = asyncio.get_event_loop()
+        raw_output = await loop.run_in_executor(
+            None, lambda: pipe(truncated)
+        )
+
+        # raw_output shape: [[{"label": str, "score": float}, ...]]
+        label_scores: dict[str, float] = {
+            item["label"].lower(): item["score"]
+            for item in raw_output[0]
+        }
+
+        # Directional score: positive - negative (both in [0,1])
+        pos = label_scores.get("positive", 0.0)
+        neg = label_scores.get("negative", 0.0)
+        neu = label_scores.get("neutral", 0.0)
+
+        raw_score = pos - neg  # [-1.0, +1.0]
+
+        # Confidence = max probability mass on a non-neutral label,
+        # discounted when neutral dominates
+        confidence = max(pos, neg)  # how strongly it leans either way
+        if neu > 0.6:               # strongly neutral → low confidence
+            confidence *= (1.0 - neu)
+
+        # Source credibility & market relevance
+        source_weight = _get_source_weight(source)
+        relevance = _compute_relevance(text, context)
+
+        # Apply source credibility to score (keeps sign, reduces magnitude)
+        final_score = max(-1.0, min(1.0, raw_score * source_weight))
+
+        # Boost confidence when article is highly relevant to the market
+        adjusted_confidence = min(1.0, confidence * (0.6 + 0.4 * relevance) * source_weight)
+
+        label = _score_to_label(final_score)
+
+        return SentimentResult(
+            text=text[:500],
+            score=round(final_score, 4),
+            label=label,
+            confidence=round(adjusted_confidence, 4),
+            keywords_found=[],   # not applicable for transformer model
+            source=source,
+            timestamp=datetime.now(timezone.utc),
+            market_relevance=round(relevance, 4),
+            analyzer_backend="finbert",
+        )
+
+    async def analyze_batch(
+        self,
+        texts: list[str],
+        context: str = "",
+        sources: list[str] | None = None,
+    ) -> list[SentimentResult]:
+        """
+        Batch analyze multiple texts in a single forward pass.
+
+        More efficient than calling `analyze` in a loop when processing
+        many news items (e.g., 30 articles per market scan).
+
+        Args:
+            texts: List of text strings to analyze.
+            context: Market question for all items.
+            sources: Source identifier per text (same length as texts).
+        """
+        if not texts:
+            return []
+
+        sources = sources or ["unknown"] * len(texts)
+        pipe = await self._get_pipeline(self.model_name, self.device)
+
+        truncated = [t[:2000] for t in texts]
+
+        loop = asyncio.get_event_loop()
+        raw_outputs = await loop.run_in_executor(
+            None,
+            lambda: pipe(truncated, batch_size=self.batch_size),
+        )
+
+        results: list[SentimentResult] = []
+        for i, output in enumerate(raw_outputs):
+            label_scores = {item["label"].lower(): item["score"] for item in output}
+            pos = label_scores.get("positive", 0.0)
+            neg = label_scores.get("negative", 0.0)
+            neu = label_scores.get("neutral", 0.0)
+
+            raw_score = pos - neg
+            confidence = max(pos, neg)
+            if neu > 0.6:
+                confidence *= (1.0 - neu)
+
+            source = sources[i] if i < len(sources) else "unknown"
+            source_weight = _get_source_weight(source)
+            relevance = _compute_relevance(texts[i], context)
+
+            final_score = max(-1.0, min(1.0, raw_score * source_weight))
+            adjusted_confidence = min(1.0, confidence * (0.6 + 0.4 * relevance) * source_weight)
+            label = _score_to_label(final_score)
+
+            results.append(SentimentResult(
+                text=texts[i][:500],
+                score=round(final_score, 4),
+                label=label,
+                confidence=round(adjusted_confidence, 4),
+                keywords_found=[],
+                source=source,
+                timestamp=datetime.now(timezone.utc),
+                market_relevance=round(relevance, 4),
+                analyzer_backend="finbert",
+            ))
+
+        return results
+
+
+# --------------------------------------------------------------------------- #
+#  Keyword / lexicon based sentiment (zero-dependency fallback)
+# --------------------------------------------------------------------------- #
+
+BULLISH_LEXICON: dict[str, float] = {
+    "confirmed": 0.7, "imminent": 0.8, "launched": 0.9, "deployed": 0.7,
+    "invaded": 0.9, "attacked": 0.9, "bombed": 0.85, "strikes": 0.7,
+    "offensive": 0.6, "escalation": 0.7, "mobilized": 0.65, "ordered": 0.6,
+    "approved": 0.7, "signed": 0.6, "passed": 0.6, "enacted": 0.65,
+    "announced": 0.5, "revealed": 0.5, "breaking": 0.6, "urgent": 0.5,
+    "inevitable": 0.75, "certain": 0.7, "guaranteed": 0.8,
+    "surge": 0.6, "spike": 0.5, "soaring": 0.6, "record": 0.4,
+    "winning": 0.6, "leading": 0.5, "ahead": 0.4, "favored": 0.5,
+    "likely": 0.5, "probable": 0.5, "expected": 0.45,
+    "rally": 0.6, "bullish": 0.7, "moon": 0.5, "breakout": 0.6,
+    "adoption": 0.5, "approval": 0.65, "etf": 0.5,
+    "elected": 0.7, "victory": 0.7, "won": 0.8, "sworn in": 0.8,
+    "inaugurated": 0.8, "ratified": 0.7,
+}
+
+BEARISH_LEXICON: dict[str, float] = {
+    "denied": 0.7, "rejected": 0.7, "unlikely": 0.6, "impossible": 0.8,
+    "withdrawn": 0.7, "retreated": 0.65, "ceasefire": 0.7, "peace": 0.6,
+    "negotiations": 0.5, "diplomacy": 0.5, "talks": 0.4, "agreement": 0.5,
+    "deal": 0.5, "resolved": 0.6, "postponed": 0.6, "delayed": 0.55,
+    "canceled": 0.7, "cancelled": 0.7, "suspended": 0.6, "halted": 0.6,
+    "failed": 0.6, "collapsed": 0.65, "stalled": 0.5,
+    "debunked": 0.7, "false": 0.6, "hoax": 0.7, "misinformation": 0.6,
+    "losing": 0.6, "trailing": 0.5, "behind": 0.4, "underdog": 0.4,
+    "doubtful": 0.5, "uncertain": 0.3, "improbable": 0.6,
+    "crash": 0.7, "bearish": 0.7, "dump": 0.6, "sell-off": 0.65,
+    "banned": 0.7, "crackdown": 0.6, "regulation": 0.4,
+    "defeated": 0.7, "lost": 0.7, "impeached": 0.6, "resigned": 0.6,
+    "vetoed": 0.7,
+}
+
+
 class KeywordSentimentAnalyzer:
     """
     Market-context-aware sentiment analyzer using keyword lexicons.
 
-    Analyzes text against bullish/bearish keyword dictionaries,
-    weighing matches by their strength and the source's credibility.
+    Zero-dependency fallback. Used when transformers/torch are not installed
+    or explicitly requested via build_sentiment_analyzer(use_finbert=False).
     """
 
     def __init__(
@@ -157,18 +447,8 @@ class KeywordSentimentAnalyzer:
         context: str = "",
         source: str = "unknown",
     ) -> SentimentResult:
-        """
-        Analyze sentiment of text relative to a market question.
-
-        Args:
-            text: The news headline, tweet, or article text.
-            context: The market question for relevance scoring.
-            source: Source identifier for credibility weighting.
-        """
         text_lower = text.lower()
-        context_lower = context.lower()
 
-        # Find keyword matches
         bull_matches: list[tuple[str, float]] = []
         bear_matches: list[tuple[str, float]] = []
 
@@ -180,46 +460,30 @@ class KeywordSentimentAnalyzer:
             if keyword in text_lower:
                 bear_matches.append((keyword, weight))
 
-        # Check for negation patterns
         negation_patterns = [
             r"\bnot\s+", r"\bno\s+", r"\bnever\s+", r"\bwon'?t\s+",
             r"\bdidn'?t\s+", r"\bdoes\s?n'?t\s+", r"\bwill\s?n'?t\s+",
-            r"\bcannot\s+", r"\bcan'?t\s+", r"\bdeny\s+", r"\brunlikely\s+to\s+",
+            r"\bcannot\s+", r"\bcan'?t\s+", r"\bdeny\s+",
         ]
         has_negation = any(re.search(p, text_lower) for p in negation_patterns)
 
-        # Calculate raw scores
         bull_score = sum(w for _, w in bull_matches)
         bear_score = sum(w for _, w in bear_matches)
 
-        # If negation detected, swap directional bias
         if has_negation:
             bull_score, bear_score = bear_score * 0.7, bull_score * 0.7
 
-        # Net score: positive = bullish, negative = bearish
         total = bull_score + bear_score
-        if total > 0:
-            raw_score = (bull_score - bear_score) / total
-        else:
-            raw_score = 0.0
+        raw_score = (bull_score - bear_score) / total if total > 0 else 0.0
 
-        # Source credibility weighting
-        source_weight = self._get_source_weight(source)
-        weighted_score = raw_score * source_weight
+        source_weight = _get_source_weight(source)
+        relevance = _compute_relevance(text, context)
+        final_score = max(-1.0, min(1.0, raw_score * source_weight * (0.5 + 0.5 * relevance)))
 
-        # Market relevance
-        relevance = self._compute_relevance(text_lower, context_lower)
-
-        # Final score, clamped to [-1, 1]
-        final_score = max(-1.0, min(1.0, weighted_score * (0.5 + 0.5 * relevance)))
-
-        # Confidence based on keyword density and source quality
         keyword_count = len(bull_matches) + len(bear_matches)
         confidence = min(1.0, (keyword_count / 5.0) * source_weight * (0.5 + 0.5 * relevance))
 
-        # Label
-        label = self._score_to_label(final_score)
-
+        label = _score_to_label(final_score)
         keywords = [k for k, _ in bull_matches] + [k for k, _ in bear_matches]
 
         return SentimentResult(
@@ -231,60 +495,56 @@ class KeywordSentimentAnalyzer:
             source=source,
             timestamp=datetime.now(timezone.utc),
             market_relevance=round(relevance, 4),
+            analyzer_backend="keyword",
         )
-
-    def _get_source_weight(self, source: str) -> float:
-        """Look up source credibility weight."""
-        source_lower = source.lower()
-        for key, weight in self.source_weights.items():
-            if key in source_lower:
-                return weight
-        return self.source_weights.get("unknown", 0.4)
-
-    def _compute_relevance(self, text: str, context: str) -> float:
-        """
-        Compute how relevant a text is to the market question.
-
-        Uses word overlap between text and market question.
-        """
-        if not context:
-            return 0.5  # unknown relevance
-
-        # Extract meaningful words (skip stop words)
-        stop_words = {
-            "the", "a", "an", "is", "are", "was", "were", "will", "be",
-            "by", "to", "in", "on", "at", "of", "for", "and", "or",
-            "this", "that", "it", "its", "with", "from", "as", "has",
-            "have", "had", "do", "does", "did", "if", "but", "not",
-            "what", "when", "where", "who", "how", "which", "than",
-        }
-
-        text_words = set(re.findall(r'\b[a-z]{3,}\b', text)) - stop_words
-        context_words = set(re.findall(r'\b[a-z]{3,}\b', context)) - stop_words
-
-        if not context_words:
-            return 0.5
-
-        overlap = text_words & context_words
-        relevance = len(overlap) / len(context_words)
-
-        return min(1.0, relevance * 1.5)  # slight boost
 
     @staticmethod
     def _score_to_label(score: float) -> SentimentLabel:
-        if score >= 0.5:
-            return SentimentLabel.VERY_BULLISH
-        elif score >= 0.15:
-            return SentimentLabel.BULLISH
-        elif score <= -0.5:
-            return SentimentLabel.VERY_BEARISH
-        elif score <= -0.15:
-            return SentimentLabel.BEARISH
-        return SentimentLabel.NEUTRAL
+        return _score_to_label(score)
 
 
 # --------------------------------------------------------------------------- #
-#  Aggregation
+#  Factory helper
+# --------------------------------------------------------------------------- #
+
+def build_sentiment_analyzer(
+    use_finbert: bool = True,
+    model_name: str = _FINBERT_MODEL,
+    device: str | int | None = None,
+    batch_size: int = 8,
+) -> FinBERTSentimentAnalyzer | KeywordSentimentAnalyzer:
+    """
+    Factory that returns a FinBERTSentimentAnalyzer when transformers/torch
+    are available, or falls back to KeywordSentimentAnalyzer.
+
+    Args:
+        use_finbert: Set False to force the keyword analyzer.
+        model_name: HuggingFace model ID (default: ProsusAI/finbert).
+        device: "cpu", "cuda", "mps", or device index. None = auto.
+        batch_size: Batch size for FinBERT inference.
+
+    Returns:
+        FinBERTSentimentAnalyzer or KeywordSentimentAnalyzer
+    """
+    if not use_finbert:
+        logger.info("Sentiment backend: keyword (forced)")
+        return KeywordSentimentAnalyzer()
+
+    try:
+        import transformers  # noqa: F401
+        import torch  # noqa: F401
+        logger.info("Sentiment backend: FinBERT (%s)", model_name)
+        return FinBERTSentimentAnalyzer(model_name=model_name, device=device, batch_size=batch_size)
+    except ImportError:
+        logger.warning(
+            "transformers/torch not installed — falling back to keyword sentiment.\n"
+            "To enable FinBERT: pip install transformers torch"
+        )
+        return KeywordSentimentAnalyzer()
+
+
+# --------------------------------------------------------------------------- #
+#  Aggregation  (unchanged, works with both backends)
 # --------------------------------------------------------------------------- #
 
 def aggregate_sentiments(
@@ -293,9 +553,8 @@ def aggregate_sentiments(
     market_question: str = "",
 ) -> AggregatedSentiment:
     """
-    Aggregate multiple sentiment results into a single market view.
-
-    Weights by: source credibility, market relevance, and recency.
+    Aggregate multiple SentimentResult objects into a single market view.
+    Weights by source credibility, market relevance, and result confidence.
     """
     if not results:
         return AggregatedSentiment(
@@ -305,15 +564,12 @@ def aggregate_sentiments(
 
     weighted_scores: list[float] = []
     weights: list[float] = []
-    bullish = 0
-    bearish = 0
-    neutral = 0
+    bullish = bearish = neutral = 0
     top_bull: list[str] = []
     top_bear: list[str] = []
     source_scores: dict[str, list[float]] = {}
 
     for r in results:
-        # Weight = confidence * relevance
         w = max(0.01, r.confidence * (0.5 + 0.5 * r.market_relevance))
         weighted_scores.append(r.score * w)
         weights.append(w)
@@ -336,18 +592,16 @@ def aggregate_sentiments(
     overall = sum(weighted_scores) / total_weight if total_weight > 0 else 0.0
     overall = max(-1.0, min(1.0, overall))
 
-    # Confidence: higher when sources agree
     score_std = _std([r.score for r in results])
     agreement_factor = max(0.0, 1.0 - score_std * 2)
     confidence = min(1.0, agreement_factor * (len(results) / 10.0))
 
-    # Source breakdown
     breakdown = {
         src: round(sum(scores) / len(scores), 3)
         for src, scores in source_scores.items()
     }
 
-    label = KeywordSentimentAnalyzer._score_to_label(overall)
+    label = _score_to_label(overall)
 
     return AggregatedSentiment(
         market_condition_id=market_condition_id,

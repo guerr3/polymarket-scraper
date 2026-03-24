@@ -5,6 +5,10 @@ pydantic>=2.5.0
 typer>=0.9.0
 rich>=13.0.0
 
+# Transformer sentiment (FinBERT)
+transformers>=4.38.0
+torch>=2.2.0
+
 # HTML fallback (optional, install separately)
 playwright>=1.40.0
 
